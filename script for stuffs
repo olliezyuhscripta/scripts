@@ -1,0 +1,261 @@
+-- Services
+local player = game.Players.LocalPlayer
+local character = player.Character or player.CharacterAdded:Wait()
+local humanoid = character:WaitForChild("Humanoid")
+local camera = workspace.CurrentCamera
+local userInputService = game:GetService("UserInputService")
+local runService = game:GetService("RunService")
+local tweenService = game:GetService("TweenService")
+local playerGui = player:WaitForChild("PlayerGui")
+
+-- Animation IDs
+local animations = {
+	run = "rbxassetid://18886549043",
+	walk = "rbxassetid://18886733367",
+	idle = "rbxassetid://18890230966",
+	punch = "rbxassetid://18890326709",
+	dash = "rbxassetid://18890492528",
+	block = "rbxassetid://18890743506",
+	special = "rbxassetid://18891041056",
+	specialMove = "rbxassetid://18891045741"
+}
+
+-- Load Animations
+local animTracks = {}
+for key, id in pairs(animations) do
+	local animation = Instance.new("Animation")
+	animation.AnimationId = id
+	animTracks[key] = humanoid:LoadAnimation(animation)
+end
+
+-- Configuration
+local maxSpeed = 28
+local normalSpeed = 16
+local crouchSpeed = 15
+local speedIncrement = 0.5
+local isHoldingShift = false
+local isBlocking = false
+local isCrouching = false
+local canPunch = true
+local punchCooldown = 1
+local lastPunchTime = 0
+local punchDamage = 20
+
+local canDash = true
+local dashCooldown = 3
+local lastDashTime = 0
+
+-- Function to gradually change speed
+local function changeSpeed(targetSpeed)
+	local currentSpeed = humanoid.WalkSpeed
+	local increment = currentSpeed < targetSpeed and speedIncrement or -speedIncrement
+
+	runService:BindToRenderStep("SpeedChange", Enum.RenderPriority.Character.Value, function()
+		if (increment > 0 and humanoid.WalkSpeed >= targetSpeed) or (increment < 0 and humanoid.WalkSpeed <= targetSpeed) then
+			humanoid.WalkSpeed = targetSpeed
+			runService:UnbindFromRenderStep("SpeedChange")
+		else
+			humanoid.WalkSpeed = humanoid.WalkSpeed + increment
+		end
+	end)
+end
+
+-- Function to adjust FOV based on speed
+local function adjustFOV(speed)
+	local minFOV = 70
+	local maxFOV = 90
+	local targetFOV = minFOV + (maxFOV - minFOV) * ((speed - normalSpeed) / (maxSpeed - normalSpeed))
+	local tweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local tween = tweenService:Create(camera, tweenInfo, {FieldOfView = targetFOV})
+	tween:Play()
+end
+
+-- Function to handle dash
+local function performDash()
+	local currentTime = tick()
+	if canDash and (currentTime - lastDashTime >= dashCooldown) then
+		canDash = false
+		lastDashTime = currentTime
+
+		-- Play dash animation and sound
+		if not animTracks.dash.IsPlaying then
+			animTracks.dash:Play()
+		end
+
+		local dashSound = Instance.new("Sound")
+		dashSound.SoundId = "rbxassetid://5989939664"
+		dashSound.Parent = character.HumanoidRootPart
+		dashSound:Play()
+
+		local dashDistance = 30
+		local dashDirection = camera.CFrame.LookVector
+		local startPosition = character.HumanoidRootPart.Position
+		local endPosition = startPosition + dashDirection * dashDistance
+
+		local ray = Ray.new(startPosition, dashDirection * dashDistance)
+		local part, position = workspace:FindPartOnRay(ray, character)
+
+		if not part then
+			character.HumanoidRootPart.CFrame = character.HumanoidRootPart.CFrame + dashDirection * dashDistance
+		else
+			character.HumanoidRootPart.CFrame = CFrame.new(position)
+		end
+
+		wait(dashCooldown)
+		canDash = true
+	else
+		print("Dash is on cooldown")
+	end
+end
+
+-- Function to handle punch
+local function handlePunch()
+	local currentTime = tick()
+	if canPunch and (currentTime - lastPunchTime >= punchCooldown) then
+		canPunch = false
+		lastPunchTime = currentTime
+
+		-- Play punch animation and sound
+		if not animTracks.punch.IsPlaying then
+			animTracks.punch:Play()
+		end
+
+		local punchSound = Instance.new("Sound")
+		punchSound.SoundId = "rbxassetid://8595980577"
+		punchSound.Parent = character.HumanoidRootPart
+		punchSound:Play()
+
+		local punchStart = character.HumanoidRootPart.Position
+		local punchEnd = punchStart + (camera.CFrame.LookVector * 5)
+		local ray = Ray.new(punchStart, (punchEnd - punchStart).unit * 5)
+		local hit, position = workspace:FindPartOnRay(ray, character)
+
+		if hit then
+			local hitHumanoid = hit.Parent:FindFirstChildOfClass("Humanoid")
+			if hitHumanoid and hitHumanoid.Parent ~= character then
+				local blockAnim = hitHumanoid.Parent:FindFirstChildOfClass("Animation")
+				if blockAnim and blockAnim.Name == "Block" then
+					local directionToHit = (hitHumanoid.Parent.HumanoidRootPart.Position - character.HumanoidRootPart.Position).unit
+					if hitHumanoid.Parent.HumanoidRootPart.CFrame.LookVector:Dot(directionToHit) < 0 then
+						hitHumanoid:TakeDamage(punchDamage + 10)
+						print("Punch hit from behind: " .. hitHumanoid.Parent.Name)
+					else
+						hitHumanoid:TakeDamage(punchDamage)
+						print("Punch hit: " .. hitHumanoid.Parent.Name)
+					end
+				else
+					hitHumanoid:TakeDamage(punchDamage)
+					print("Punch hit: " .. hitHumanoid.Parent.Name)
+				end
+			end
+		end
+
+		wait(0.5)
+		canPunch = true
+	else
+		print("Punch is on cooldown")
+	end
+end
+
+-- Function to handle block
+local function handleBlock()
+	if not isBlocking then
+		isBlocking = true
+		if not animTracks.block.IsPlaying then
+			animTracks.block:Play()
+		end
+		humanoid.WalkSpeed = 14
+	else
+		isBlocking = false
+		animTracks.block:Stop()
+		humanoid.WalkSpeed = normalSpeed
+	end
+end
+
+-- Function to handle crouch
+local function handleCrouch()
+	if isCrouching then
+		isCrouching = false
+		humanoid.WalkSpeed = normalSpeed
+		animTracks.special:Stop()
+		animTracks.specialMove:Stop()
+		if not animTracks.idle.IsPlaying and not isBlocking then
+			animTracks.idle:Play()
+		end
+	else
+		isCrouching = true
+		humanoid.WalkSpeed = crouchSpeed
+		animTracks.special:Play()
+	end
+end
+
+-- Function to manage idle animation
+local function manageIdleAnimation(speed)
+	if speed == 0 and not isCrouching and not isBlocking then
+		if not animTracks.idle.IsPlaying then
+			animTracks.idle:Play()
+		end
+	else
+		animTracks.idle:Stop()
+	end
+end
+
+-- Play the appropriate animation based on speed
+humanoid.Running:Connect(function(speed)
+	adjustFOV(speed)
+	if isCrouching then
+		if userInputService:IsKeyDown(Enum.KeyCode.W) then
+			if not animTracks.specialMove.IsPlaying then
+				animTracks.specialMove:Play()
+			end
+		else
+			if not animTracks.special.IsPlaying then
+				animTracks.special:Play()
+			end
+		end
+		return
+	end
+
+	if speed >= 15 and speed < 20 then
+		if not animTracks.walk.IsPlaying then
+			animTracks.walk:Play()
+		end
+		animTracks.run:Stop()
+	elseif speed >= 20 then
+		if not animTracks.run.IsPlaying then
+			animTracks.run:Play()
+		end
+		animTracks.run:AdjustSpeed(speed / 20)
+		animTracks.walk:Stop()
+	else
+		animTracks.walk:Stop()
+		animTracks.run:Stop()
+	end
+
+	manageIdleAnimation(speed)
+end)
+
+-- Handle input for actions
+userInputService.InputBegan:Connect(function(input, gameProcessed)
+	if gameProcessed then return end
+
+	if input.UserInputType == Enum.UserInputType.MouseButton1 then
+		handlePunch()
+	elseif input.KeyCode == Enum.KeyCode.LeftShift then
+		isHoldingShift = true
+		changeSpeed(maxSpeed)
+	elseif input.KeyCode == Enum.KeyCode.E then
+		handleBlock()
+	elseif input.KeyCode == Enum.KeyCode.C then
+		handleCrouch()
+	elseif input.KeyCode == Enum.KeyCode.Space then
+		performDash()
+	end
+end)
+
+userInputService.InputEnded:Connect(function(input)
+	if input.KeyCode == Enum.KeyCode.LeftShift then
+		isHoldingShift = false
+		changeSpeed(normalSpeed)
+	end
+end)
